@@ -2,12 +2,15 @@ import json
 import logging
 import os
 import secrets
+import time
 from collections import defaultdict
+from datetime import timezone, datetime, timedelta
 from urllib.parse import urlencode, urlparse, parse_qs, unquote
 
 import click
 import requests
 from bs4 import BeautifulSoup
+from dateutil.parser import parse
 
 from conf import CLIENT_ID, CLIENT_SECRET, CALLBACK_URL, DATA_FOLDER
 
@@ -105,6 +108,7 @@ def _iterate_paged_list(session, cloudid, url):
         r.raise_for_status()
         d = r.json()
         yield from d['results']
+        time.sleep(.5)
 
 
 def _storage_path(webui_url):
@@ -123,12 +127,12 @@ def _process_page(spacekey, content, attachments):
     path_to_data = '../' * (content['_links']['webui'].count('/') - 1)
 
     for a in soup.find_all('a'):
-        if a.attrs['href'].startswith('/wiki/'):
+        if a.attrs.get('href') and a.attrs['href'].startswith('/wiki/'):
             a.attrs['href'] += '.html'
             a.attrs['href'] = a.attrs['href'].replace('/wiki/', path_to_data)
 
     for img in soup.find_all('img'):
-        if '/thumbnails/' in img.attrs['src']:
+        if img.attrs.get('src') and '/thumbnails/' in img.attrs['src']:
             # file:///home/raphael/proj/confluence-scraper/data/download/attachments/46760067/crewpit_logo_large.ai?version=2&modificationDate=1578330838272&cacheVersion=1&api=v2
             img.attrs['src'] = path_to_data + 'download/attachments/' + img.attrs['src'].split('/thumbnails/')[1]
             if 'srcset' in img.attrs:
@@ -225,7 +229,10 @@ def download(space):
             children = defaultdict(list)
             for content in _iterate_paged_list(session, cloudid,
                                                f'/rest/api/content?{urlencode({"spaceKey": spacekey, "expand": "body.styled_view,ancestors"})}'):
-                if content['status'] != 'archived':
+                if content['status'] == 'archived':
+                    fail_ok = True
+                else:
+                    fail_ok = False
                     parent = content['ancestors'][-1]['id'] if content['ancestors'] else None
                     children[parent].append((
                         content['id'],
@@ -233,24 +240,36 @@ def download(space):
                         content['_links']['webui'].replace(f'/spaces/{spacekey}/', '') + '.html',
                     ))
 
-                attachments = []
-                for attachment in _iterate_paged_list(session, cloudid,
-                                                      f'/rest/api/content/{content["id"]}/child/attachment'):
-                    storage_path = _storage_path(urlparse(attachment['_links']['download']).path)
-                    attachments.append((
-                        attachment['title'],
-                        urlparse(attachment['_links']['download']).path,
-                    ))
-                    if os.path.exists(storage_path):
-                        # todo: version check?
-                        continue
-                    with open(storage_path, 'wb') as f:
-                        r = session.get(
-                            f'https://api.atlassian.com/ex/confluence/{cloudid}/rest/api/content/{content["id"]}/child/attachment/{attachment["id"]}/download')
-                        r.raise_for_status()
-                        for chunk in r.iter_content(chunk_size=512 * 1024):
-                            if chunk:  # filter out keep-alive new chunks
-                                f.write(chunk)
+                logging.debug(f"Downloading page {content['title']} ({content['status']})")
+                try:
+                    attachments = []
+                    for attachment in _iterate_paged_list(session, cloudid,
+                                                          f'/rest/api/content/{content["id"]}/child/attachment?expand=history.lastUpdated'):
+                        storage_path = _storage_path(urlparse(attachment['_links']['download']).path)
+                        attachments.append((
+                            attachment['title'],
+                            urlparse(attachment['_links']['download']).path,
+                        ))
+
+                        if os.path.exists(storage_path):
+                            # simplistic version check
+                            lastUpdate = parse(attachment['history']['lastUpdated']['when'])
+                            lastDownload = datetime.fromtimestamp(os.stat(storage_path).st_mtime, tz=timezone.utc)
+                            if lastDownload > lastUpdate + timedelta(minutes=30):
+                                continue
+
+                        logging.debug(f"Downloading attachment {attachment['title']}")
+                        with open(storage_path, 'wb') as f:
+                            r = session.get(
+                                f'https://api.atlassian.com/ex/confluence/{cloudid}/rest/api/content/{content["id"]}/child/attachment/{attachment["id"]}/download')
+                            r.raise_for_status()
+                            for chunk in r.iter_content(chunk_size=512 * 1024):
+                                if chunk:  # filter out keep-alive new chunks
+                                    f.write(chunk)
+                        time.sleep(.5)
+                except:
+                    if not fail_ok:
+                        raise
 
                 with open(_storage_path(content['_links']['webui']), 'w') as f:
                     f.write(_process_page(spacekey, content, attachments))
