@@ -262,10 +262,14 @@ def download(space):
                         with open(storage_path, 'wb') as f:
                             r = session.get(
                                 f'https://api.atlassian.com/ex/confluence/{cloudid}/rest/api/content/{content["id"]}/child/attachment/{attachment["id"]}/download')
-                            r.raise_for_status()
-                            for chunk in r.iter_content(chunk_size=512 * 1024):
-                                if chunk:  # filter out keep-alive new chunks
-                                    f.write(chunk)
+                            try:
+                                r.raise_for_status()
+                            except:
+                                logging.exception('Could not download attachment')
+                            else:
+                                for chunk in r.iter_content(chunk_size=512 * 1024):
+                                    if chunk:  # filter out keep-alive new chunks
+                                        f.write(chunk)
                         time.sleep(.5)
                 except:
                     if not fail_ok:
