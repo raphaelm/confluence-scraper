@@ -28,6 +28,17 @@ MAX_ATTACHMENT_SIZE = 1024 * 1024 * 1024  # 1 GB
 
 * Run ``python main.py download`` to start the download.
 
+Features
+--------
+
+* Downloads all pages in HTML format
+
+* Downloads all attachments
+
+* Correctly fixes relative links between pages and attachments
+
+* Correclty fixes emoji
+
 Known issues & limitations
 --------------------------
 
