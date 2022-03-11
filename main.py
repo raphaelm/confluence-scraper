@@ -12,9 +12,10 @@ import requests
 from bs4 import BeautifulSoup
 from dateutil.parser import parse
 
+import conf
 from conf import CLIENT_ID, CLIENT_SECRET, CALLBACK_URL, DATA_FOLDER
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 
 @click.group()
@@ -224,15 +225,12 @@ def download(space):
         else:
             spaces = [s['key'] for s in _iterate_paged_list(session, cloudid, '/rest/api/space')]
         for spacekey in spaces:
-            logging.debug(f'Downloading space {spacekey}')
+            logging.info(f'Downloading space {spacekey}')
 
             children = defaultdict(list)
             for content in _iterate_paged_list(session, cloudid,
                                                f'/rest/api/content?{urlencode({"spaceKey": spacekey, "expand": "body.styled_view,ancestors"})}'):
-                if content['status'] == 'archived':
-                    fail_ok = True
-                else:
-                    fail_ok = False
+                if content['status'] != 'archived':
                     parent = content['ancestors'][-1]['id'] if content['ancestors'] else None
                     children[parent].append((
                         content['id'],
@@ -240,40 +238,40 @@ def download(space):
                         content['_links']['webui'].replace(f'/spaces/{spacekey}/', '') + '.html',
                     ))
 
-                logging.debug(f"Downloading page {content['title']} ({content['status']})")
-                try:
-                    attachments = []
-                    for attachment in _iterate_paged_list(session, cloudid,
-                                                          f'/rest/api/content/{content["id"]}/child/attachment?expand=history.lastUpdated'):
-                        storage_path = _storage_path(urlparse(attachment['_links']['download']).path)
-                        attachments.append((
-                            attachment['title'],
-                            urlparse(attachment['_links']['download']).path,
-                        ))
+                logging.info(f"Downloading page {spacekey}/{content['title']} ({content['status']})")
+                attachments = []
+                for attachment in _iterate_paged_list(session, cloudid,
+                                                      f'/rest/api/content/{content["id"]}/child/attachment?expand=history.lastUpdated'):
+                    storage_path = _storage_path(urlparse(attachment['_links']['download']).path)
+                    attachments.append((
+                        attachment['title'],
+                        urlparse(attachment['_links']['download']).path,
+                    ))
 
-                        if os.path.exists(storage_path):
-                            # simplistic version check
-                            lastUpdate = parse(attachment['history']['lastUpdated']['when'])
-                            lastDownload = datetime.fromtimestamp(os.stat(storage_path).st_mtime, tz=timezone.utc)
-                            if lastDownload > lastUpdate + timedelta(minutes=30):
-                                continue
+                    if os.path.exists(storage_path):
+                        # simplistic version check
+                        lastUpdate = parse(attachment['history']['lastUpdated']['when'])
+                        lastDownload = datetime.fromtimestamp(os.stat(storage_path).st_mtime, tz=timezone.utc)
+                        if lastDownload > lastUpdate + timedelta(minutes=30):
+                            continue
 
-                        logging.debug(f"Downloading attachment {attachment['title']}")
-                        with open(storage_path, 'wb') as f:
-                            r = session.get(
-                                f'https://api.atlassian.com/ex/confluence/{cloudid}/rest/api/content/{content["id"]}/child/attachment/{attachment["id"]}/download')
-                            try:
-                                r.raise_for_status()
-                            except:
-                                logging.exception('Could not download attachment')
-                            else:
-                                for chunk in r.iter_content(chunk_size=512 * 1024):
-                                    if chunk:  # filter out keep-alive new chunks
-                                        f.write(chunk)
-                        time.sleep(.5)
-                except:
-                    if not fail_ok:
-                        raise
+                    if attachment['extensions']['fileSize'] > conf.MAX_ATTACHMENT_SIZE:
+                        logging.warning(f"Skipping attachment {attachment['title']} on page {spacekey}/{content['title']} because it is larger than the maximum size")
+                        continue
+
+                    logging.debug(f"Downloading attachment {attachment['title']}")
+                    with open(storage_path, 'wb') as f:
+                        r = session.get(
+                            f'https://api.atlassian.com/ex/confluence/{cloudid}/rest/api/content/{content["id"]}/child/attachment/{attachment["id"]}/download')
+                        try:
+                            r.raise_for_status()
+                        except:
+                            logging.warning(f"Could not download attachment {attachment['title']} on page {spacekey}/{content['title']}")
+                        else:
+                            for chunk in r.iter_content(chunk_size=512 * 1024):
+                                if chunk:  # filter out keep-alive new chunks
+                                    f.write(chunk)
+                    time.sleep(.5)
 
                 with open(_storage_path(content['_links']['webui']), 'w') as f:
                     f.write(_process_page(spacekey, content, attachments))
