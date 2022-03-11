@@ -133,6 +133,11 @@ def _process_page(spacekey, content, attachments):
             a.attrs['href'] = a.attrs['href'].replace('/wiki/', path_to_data)
 
     for img in soup.find_all('img'):
+        if img.attrs.get('data-emoji-fallback'):
+            img.name = 'span'
+            img.append(img.attrs.get('data-emoji-fallback'))
+            img.attrs = {}
+            continue
         if img.attrs.get('src') and '/thumbnails/' in img.attrs['src']:
             # file:///home/raphael/proj/confluence-scraper/data/download/attachments/46760067/crewpit_logo_large.ai?version=2&modificationDate=1578330838272&cacheVersion=1&api=v2
             img.attrs['src'] = path_to_data + 'download/attachments/' + img.attrs['src'].split('/thumbnails/')[1]
