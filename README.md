@@ -37,3 +37,6 @@ Known issues & limitations
 * Macros are not rendered, but their content is in some cases. For example, the "Info" macro looks fine,
   while the "draw.io" macro does not render anything. However, draw.io diagrams are preserved through
   a list of attachments.
+  
+* Thumbnails are not preserved and instead replaced with their original file. This works okayish for
+  images, but not for PDFs.
