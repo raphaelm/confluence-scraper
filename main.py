@@ -31,7 +31,7 @@ def auth():
     auth_url = 'https://auth.atlassian.com/authorize?' + urlencode({
         'audience': 'api.atlassian.com',
         'client_id': CLIENT_ID,
-        'scope': 'offline_access read:template:confluence read:space:confluence read:space-details:confluence read:relation:confluence read:custom-content:confluence read:content.metadata:confluence read:content:confluence read:content-details:confluence read:comment:confluence read:attachment:confluence read:content.property:confluence read:page:confluence read:label:confluence',
+        'scope': 'offline_access read:template:confluence read:space:confluence read:space-details:confluence read:relation:confluence read:custom-content:confluence read:content.metadata:confluence read:content:confluence read:content-details:confluence read:comment:confluence read:attachment:confluence read:content.property:confluence read:page:confluence read:label:confluence read:folder:confluence read:database:confluence read:hierarchical-content:confluence',
         'redirect_uri': CALLBACK_URL,
         'state': state,
         'response_type': 'code',
@@ -113,7 +113,7 @@ def _iterate_paged_list(session, cloudid, url):
 
 
 def _storage_path(webui_url, ext="html"):
-    if '/pages/' in webui_url or '/overview' in webui_url:
+    if '/pages/' in webui_url or '/overview' in webui_url or '/blog/' in webui_url:
         webui_url += '.' + ext
     dirname = os.path.dirname(DATA_FOLDER + webui_url)
     if not os.path.exists(dirname):
@@ -194,7 +194,10 @@ def _build_toc(children, node):
     if node not in children:
         return ""
     for nodeid, title, link in children[node]:
-        items.append(f"<li><a href='{link}'>{title}</a>{_build_toc(children, nodeid)}</li>")
+        if link:
+            items.append(f"<li><a href='{link}'>{title}</a>{_build_toc(children, nodeid)}</li>")
+        else:
+            items.append(f"<li>{title}{_build_toc(children, nodeid)}</li>")
     return f'<ul>{"".join(items)}</ul>'
 
 
@@ -213,6 +216,74 @@ def _write_toc(path, children):
         </body>
     </html>
     """)
+
+
+def _get_folder(children, session, cloudid, folderid):
+    r = session.get(f'https://api.atlassian.com/ex/confluence/{cloudid}/api/v2/folders/{folderid}')
+    r.raise_for_status()
+    content = r.json()
+    parent = content.get('parentId')
+    children[parent].append((
+        content['id'],
+        content['title'],
+        None,
+    ))
+
+
+def _download_content(content, children, spacekey, session, cloudid, t="page"):
+    if content['status'] == 'current':
+        parent = content.get('parentId')
+        if parent and content.get('parentType') == 'folder' and parent not in children:
+            _get_folder(children, session, cloudid, parent)
+        children[parent].append((
+            content['id'],
+            content['title'],
+            content['_links']['webui'].replace(f'/spaces/{spacekey}/', '') + '.html',
+        ))
+
+    r = session.get(f'https://api.atlassian.com/ex/confluence/{cloudid}/api/v2/{t}s/{content["id"]}?body-format=export_view')
+    content["body"].update(r.json()["body"])
+
+    logging.info(f"Downloading {t} {spacekey}/{content['title']} ({content['status']})")
+    attachments = []
+    for attachment in _iterate_paged_list(session, cloudid,
+                                          f'/api/v2/{t}s/{content["id"]}/attachments'):
+        storage_path = _storage_path(urlparse(attachment['_links']['download']).path)
+        attachments.append((
+            attachment['title'],
+            urlparse(attachment['_links']['download']).path,
+        ))
+
+        if os.path.exists(storage_path):
+            # simplistic version check
+            lastUpdate = parse(attachment['version']['createdAt'])
+            lastDownload = datetime.fromtimestamp(os.stat(storage_path).st_mtime, tz=timezone.utc)
+            if lastDownload > lastUpdate + timedelta(minutes=30):
+                continue
+
+        if attachment['fileSize'] > conf.MAX_ATTACHMENT_SIZE:
+            logging.warning(f"Skipping attachment {attachment['title']} on {t} {spacekey}/{content['title']} because it is larger than the maximum size")
+            continue
+
+        logging.debug(f"Downloading attachment {attachment['title']}")
+        with open(storage_path, 'wb') as f:
+            # This requires the V1 API still: https://community.developer.atlassian.com/t/download-attachment-from-confluence-page/76017/4
+            #r = session.get(attachment['downloadLink'])
+            r = session.get(f'https://api.atlassian.com/ex/confluence/{cloudid}/rest/api/content/{content["id"]}/child/attachment/{attachment["id"]}/download')
+            try:
+                r.raise_for_status()
+            except:
+                logging.warning(f"Could not download attachment {attachment['title']} on {t} {spacekey}/{content['title']}")
+            else:
+                for chunk in r.iter_content(chunk_size=512 * 1024):
+                    if chunk:  # filter out keep-alive new chunks
+                        f.write(chunk)
+        time.sleep(.5)
+
+    with open(_storage_path(content['_links']['webui']), 'w') as f:
+        f.write(_process_page(spacekey, content, attachments))
+    with open(_storage_path(content['_links']['webui'], ext="json"), 'w') as f:
+        json.dump(content["body"]["atlas_doc_format"]["value"], f)
 
 
 @cli.command()
@@ -234,58 +305,10 @@ def download(space):
 
             for content in _iterate_paged_list(session, cloudid,
                                                f'/api/v2/spaces/{spaceid}/pages?body-format=atlas_doc_format'):
-                if content['status'] == 'current':
-                    parent = content['parentId'] 
-                    children[parent].append((
-                        content['id'],
-                        content['title'],
-                        content['_links']['webui'].replace(f'/spaces/{spacekey}/', '') + '.html',
-                    ))
-
-
-                r = session.get(f'https://api.atlassian.com/ex/confluence/{cloudid}/api/v2/pages/{content["id"]}?body-format=export_view')
-                content["body"].update(r.json()["body"])
-
-                logging.info(f"Downloading page {spacekey}/{content['title']} ({content['status']})")
-                attachments = []
-                for attachment in _iterate_paged_list(session, cloudid,
-                                                      f'/api/v2/pages/{content["id"]}/attachments'):
-                    storage_path = _storage_path(urlparse(attachment['_links']['download']).path)
-                    attachments.append((
-                        attachment['title'],
-                        urlparse(attachment['_links']['download']).path,
-                    ))
-
-                    if os.path.exists(storage_path):
-                        # simplistic version check
-                        lastUpdate = parse(attachment['version']['createdAt'])
-                        lastDownload = datetime.fromtimestamp(os.stat(storage_path).st_mtime, tz=timezone.utc)
-                        if lastDownload > lastUpdate + timedelta(minutes=30):
-                            continue
-
-                    if attachment['fileSize'] > conf.MAX_ATTACHMENT_SIZE:
-                        logging.warning(f"Skipping attachment {attachment['title']} on page {spacekey}/{content['title']} because it is larger than the maximum size")
-                        continue
-
-                    logging.debug(f"Downloading attachment {attachment['title']}")
-                    with open(storage_path, 'wb') as f:
-                        # This requires the V1 API still: https://community.developer.atlassian.com/t/download-attachment-from-confluence-page/76017/4
-                        #r = session.get(attachment['downloadLink'])
-                        r = session.get(f'https://api.atlassian.com/ex/confluence/{cloudid}/rest/api/content/{content["id"]}/child/attachment/{attachment["id"]}/download')
-                        try:
-                            r.raise_for_status()
-                        except:
-                            logging.warning(f"Could not download attachment {attachment['title']} on page {spacekey}/{content['title']}")
-                        else:
-                            for chunk in r.iter_content(chunk_size=512 * 1024):
-                                if chunk:  # filter out keep-alive new chunks
-                                    f.write(chunk)
-                    time.sleep(.5)
-
-                with open(_storage_path(content['_links']['webui']), 'w') as f:
-                    f.write(_process_page(spacekey, content, attachments))
-                with open(_storage_path(content['_links']['webui'], ext="json"), 'w') as f:
-                    json.dump(content["body"]["atlas_doc_format"]["value"], f)
+                _download_content(content, children, spacekey, session, cloudid, "page")
+            for content in _iterate_paged_list(session, cloudid,
+                                               f'/api/v2/spaces/{spaceid}/blogposts?body-format=atlas_doc_format'):
+                _download_content(content, children, spacekey, session, cloudid, "blogpost")
 
             _write_toc(_storage_path(f'/spaces/{spacekey}/index.html'), children)
 

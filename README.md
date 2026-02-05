@@ -41,9 +41,9 @@ MAX_ATTACHMENT_SIZE = 1024 * 1024 * 1024  # 1 GB
 Features
 --------
 
-* Downloads all pages in HTML format
+* Downloads all pages, blog posts and livedocs in HTML format
 
-* Downloads all attachments
+* Downloads all attachments for these pages, blog posts and livedocs
 
 * Correctly fixes relative links between pages and attachments
 
@@ -52,12 +52,21 @@ Features
 Known issues & limitations
 --------------------------
 
-* The table of contents will be entirely out of order, since the confluence API does not expose
-  the order of pages.
-  
+* The table of contents will be entirely out of order.
+
 * Macros are not rendered, but their content is in some cases. For example, the "Info" macro looks fine,
   while the "draw.io" macro does not render anything. However, draw.io diagrams are preserved through
   a list of attachments.
   
 * Thumbnails are not preserved and instead replaced with their original file. This works okayish for
   images, but not for PDFs.
+
+* No download of comments
+
+* No download of databases, whiteboards or smart links
+
+* No download of whiteboards
+
+* No download of custom content
+
+* No backup of permissions
